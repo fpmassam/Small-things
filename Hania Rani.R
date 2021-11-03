@@ -6,8 +6,8 @@ require(data.table)
 require(psych)
 
 #Get Access to Spotify
-Client = '9cf32ced039f4c9391febae7c65db74f'
-Client_Secret =  '354489a2808c44eca970ef50eea26ea5'
+Client = ''
+Client_Secret =  ''
 spotify_token = get_spotify_access_token(Client, Client_Secret)
 
 
