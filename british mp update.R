@@ -16,11 +16,11 @@ MPsonTwitter_list_followers <- read_csv("MPsonTwitter_list_followers.csv")
 View(MPsonTwitter_list_followers)
 
 
-api_key = 'sIFDKcm4jS04ocSfSGth91CBc'
-api_secret = 'piWh5ro0Oa6ye1TYoUSQ328fGHTIJ9VvvP8xi7VtALHpG404xf'
-bearer_token = 'AAAAAAAAAAAAAAAAAAAAAIQtuQAAAAAAAn%2B9nfU93cUPj84RrRWLDaL0teA%3D2YJzNQMZJdpmDzkSFKLFgq5gaCuyC10LngYdXs3XUiKvJeCWP0'
-access_token = '14867447-giPBQvo6AGzVrd9WU3Sf7JwDsGwgBVTGjr5FBue5l'
-access_secret = 'DyDcHn7xrHJoN5CAke5b73q8VFls4RYB0gNto0keIDW7J'
+api_key = ''
+api_secret = ''
+bearer_token = ''
+access_token = ''
+access_secret = ""
 tw_token = rtweet_app(bearer_token)
 
 create_token(app = "EuPolitics", api_key, api_secret, access_token, access_secret)
