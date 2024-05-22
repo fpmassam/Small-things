@@ -1,0 +1,411 @@
+---
+title: "Nonparametric regressions vs. linear regressions: a methodological benchmark"
+subtitle: "An investigation on linear fallacies in electoral studies"
+author: "Francesco Piccinelli Casagrande"
+abstract: "This study investigates the effectiveness of nonparametric regressions in electoral studies, specifically focusing on the 2019 European elections and the performance of liberal democratic parties. Traditional political analysis often relies on linear models, such as OLS regressions, which assume linear relationships between variables. This research challenges that assumption by comparing linear and nonparametric regression models to better understand voter behavior. Using data from 151 NUTS2 regions across 13 European countries, the study evaluates the influence of GDP per capita, urbanization, and educational attainment on the vote share for liberal democratic parties. The findings indicate that nonparametric models, which do not assume a predefined relationship between variables, provide a more accurate fit and reveal complex, non-linear relationships that linear models fail to capture. This suggests that nonparametric regressions offer valuable insights into electoral behavior, though their application requires careful consideration of context and computational resources. The study highlights the potential of nonparametric methods to enhance political analysis and inform more effective electoral strategies."
+format: 'pdf'
+bibliography: references.bib
+---
+
+```{r, include=FALSE}
+require(eurostat)
+require(tidyverse)
+library(broom) 
+library(stargazer)
+library(plm)
+library(lme4)
+library(np)
+library(kableExtra)
+library(stargazer)
+
+load("~/Documents/ALDE Project/eu_ned_joint.RData")
+x -> nuts_data
+rm(x)
+
+urbanisation = get_eurostat("lfst_r_lfsd2hh", time_format = "num", stringsAsFactors = FALSE)
+colnames(urbanisation)[4:5] = c('nuts2016', 'year')
+urbanisation =  subset(urbanisation, !(deg_urb == "TOTAL"))
+urbanisation_1 = urbanisation %>% group_by(nuts2016, year) %>% mutate(share = values/sum(values)) %>% select(nuts2016, year, deg_urb, share)
+urbanisation_1 = reshape2::dcast(year + nuts2016~deg_urb, data = urbanisation_1)
+urbanisation_1[is.na(urbanisation_1)] <- 0
+
+gdp_nuts_2 = get_eurostat("nama_10r_2gdp", time_format = "num", stringsAsFactors = FALSE)
+gdp_nuts_2 = subset(gdp_nuts_2, unit == "EUR_HAB")
+
+gdp_nuts_3 = get_eurostat("nama_10r_3gdp", time_format = "num", stringsAsFactors = FALSE)
+
+
+education = get_eurostat("edat_lfse_04", time_format = "num", stringsAsFactors = FALSE)
+education = subset(education, isced11 ==  "ED5-8" & age == "Y25-64")
+colnames(education)[6] = 'nuts2016'
+education = education %>% select(TIME_PERIOD, sex, nuts2016, values) %>% rename(year = TIME_PERIOD, tertiary_education = values)
+education$tertiary_education = education$tertiary_education/100
+education = reshape2::dcast(year + nuts2016~sex, data = education)
+colnames(education)[3:5] = c("f_tertiary", "m_tertiary", 'total_tertiary')
+
+#Filter party belonging to ALDE and by European elections 
+nuts_data = subset(nuts_data, year %in% c(2004, 2009, 2014, 2019) & type == "EP")
+
+Liberal_Democratic_Parties_EU <-ALDE_Parties_in_EU_Countries <- read_delim("ALDE_Parties_in_EU_Countries.csv",delim = "\t", escape_double = FALSE, locale = locale(), trim_ws = TRUE)
+
+nuts_data$party_abbreviation = toupper(nuts_data$party_abbreviation)
+nuts_alde = subset(nuts_data, party_abbreviation %in% Liberal_Democratic_Parties_EU$Abbreviation)
+nuts_alde_3 = subset(nuts_alde, nutslevel == 3)
+nuts_alde_2 = subset(nuts_alde, nutslevel == 2)
+nuts_alde_3 <- nuts_alde_3 %>%
+  mutate(NUTS_2 = sub("^(.{4}).*", "\\1", nuts2016))
+nuts_alde_2 = nuts_alde_2 %>% select(country_code, nuts2016, validvote, party_abbreviation, partyvote, year)
+nuts_alde_3 = nuts_alde_3 %>% select(country_code, NUTS_2, validvote, party_abbreviation, partyvote, year) %>% rename(nuts2016 = NUTS_2)
+nuts_alde_3 = aggregate(.~country_code + nuts2016 + party_abbreviation +year, FUN = sum, data = nuts_alde_3)
+
+nuts_alde = rbind(nuts_alde_2, nuts_alde_3)
+nuts_alde$share = nuts_alde$partyvote/nuts_alde$validvote
+
+gdp_nuts_2 = gdp_nuts_2 %>% select(geo, TIME_PERIOD, values) %>% filter(TIME_PERIOD %in% c(2004, 2009, 2014, 2019)) %>% rename(nuts2016 = geo, year = TIME_PERIOD , gdp_pc = values)
+
+data =  merge(nuts_alde, gdp_nuts_2)
+data = merge(data, education)
+data = merge(data, urbanisation_1)
+data_19 = subset(data, year == 2019)
+```
+
+# Introduction
+
+This analysis will ask a methodological question and try to answer it in a real-life case study. The standard assumption in political analysis is that relationships are linear. OLS regressions are the workhorse of political science with entire handbooks and cornerstones of (among others) democracy studies [@teorell2010] based upon this pillar. Others [@norris2012] already visualized non-linear relationships between democracy levels and socioeconomic variables. Yet, the systematic use of nonparametric regressions is still not as widespread as it could be.
+
+Non-linearity and nonparametric regressions are well-discussed in social science [@andersen2009] and find use in regression discontinuity designs [@imbens2008]. My research question is more basic: assuming that social and economic variables have an effect on electoral preferences [@anderson2013] [@scala2017], what is the shape of such a relationship?
+
+This is exactly what some might find unsatisfying about the way non-linear regressions work. In R, a non-linear regressions are performed as follows.
+
+``` r
+reg =lm(y~log(x), data = data)
+```
+
+The problem is that often researchers do not always have enough information to guess (a-priori) if a relationship is linear or (as in this case) logarithmic, and in reality, relationship are rarely linear [@delange2017]. The solution to this problem comes in the shape of nonparametric regressions and via the *np* R package [@np].
+
+## The research design
+
+The subject of the analysis is the electoral results of liberal-democratic parties in Europe in the 2019 European election at NUTS2 level [@schraff2022]. The dataset aggregates NUTS3 into NUTS2 and involves 13 countries and 151 regions.
+
+The dependent variable is the share of votes by Liberal democratic parties. Independent variables are GDP per capita [@eurostat2022a] *gdp_pc* in the tables, urbanization [@eurostat2022] by households living in primary (DEG1), secondary (DEG2), tertiary (DEG3) expressed in households per 1,000. The final predictor is educational attainment [@eurostat2022c] (share of the population above 24 years old with tertiary education, split as follows: gender – *f_tertiary* for females, *m_tertiary* for males, and *total_tertary* for the total.
+
+The analysis will proceed in steps. It will start assuming that the relationship is linear, then the study will proceed to a nonparametric regression. In particular, I will use an OLS regression over the 2019 European election. The second step will be a nonparametric regression. I will also test the nonparametric regression using a quasi-regression discontinuity design where I will split the countries between West-European countries and formerly Communist-ruled countries. Finally, I will perform a linear regression including countries as factors.
+
+The countries and parties are in the following table:
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+
+codes = data_19 %>% select(country_code, party_abbreviation)
+countires = nuts_data %>% select(country_code, party_abbreviation, party_english, country) %>% unique()
+
+codes = merge(codes, countires)
+codes = unique(codes)
+codes = codes %>% select(country, party_english)
+colnames(codes) = c("Country", "Party")
+rownames(codes) = NULL
+codes$Party = stringr::str_to_sentence(codes$Party)
+codes$Party[codes$Country == "Spain"] <- "Citizens"
+kable_paper(kable(codes))
+```
+
+To collect this sample, I asked ChatGPT 4 [@chatgpt2024] four to provide a list of European liberal democratic parties. After manually coding the French, I performed an extraction of the parties using the following code:
+
+``` r
+nuts_alde = subset(nuts_data, party_abbreviation 
+  %in% Liberal_Democratic_Parties_EU$Abbreviation)
+```
+
+Outside the partyfacts dataset, there is no standardized way to code party abbreviations in English. This is a limitation in general; here, it is a feature because it allows testing if, with limited time and resources, it is possible to integrate generative AI tools to support research.
+
+The model can be summarized as follows:
+
+$$
+Y_{\text{(share of votes)}} = \beta{_\text{(intercept)}} +\Phi_i + \epsilon
+$$
+
+The regression above tries to predict the share of votes by a vector $\Phi_i$ with the socioeconomic variables described above. Please note that it intentionally avoids interactions among variables in order to keep the model simple and readable. I will use the same R formula for the linear model and for the non-linear model alike. The only difference will be that, in the latter, the concept of intercept is practically meaningless.
+
+## The analysis
+
+### Linear model
+
+In this section, I will estimate the relationship between the share of votes for liberal democratic parties using the variables discussed in the research design. The results of this model are in the following table.
+
+```{r verbose = FALSE, echo=FALSE, message=FALSE, warning=FALSE, results='asis'}
+gdp = lm(share ~ gdp_pc + DEG1 + DEG2 + DEG3 + f_tertiary + m_tertiary + total_tertiary, data = data_19)
+
+# Extract model statistics
+model_summary <- summary(gdp)
+tidy_model <- broom::tidy(model_summary)
+# Add significance stars manually
+tidy_model <- tidy_model %>%
+  mutate(signif = symnum(p.value, corr = FALSE, na = FALSE, 
+                         cutpoints = c(0, 0.001, 0.01, 0.05, 0.1, 1), 
+                         symbols = c("***", "**", "*", ".", " ")))
+
+# Extract and format the coefficients
+coefficients <- tidy_model %>%
+  select(term, estimate, std.error, statistic, p.value, signif)
+
+# Print coefficients table
+kable(coefficients, caption = "Signif. codes:  0 ‘***’ 0.001 ‘**’ 0.01 ‘*’ 0.05 ‘.’ 0.1 ‘ ’ 1")
+
+# Extract R-squared and other statistics
+stats <- tibble(
+  Statistic = c("Multiple R-squared", "Adjusted R-squared", 
+                "F-statistic", "p-value"),
+  Value = c(model_summary$r.squared, model_summary$adj.r.squared, 
+            model_summary$fstatistic[1], pf(model_summary$fstatistic[1], 
+            model_summary$fstatistic[2], model_summary$fstatistic[3], lower.tail = FALSE))
+)
+
+# Print model statistics table
+kable(stats, caption = "Model Summary Statistics")
+```
+
+The model describes a a small bu statistically significant negative relationship between the GDP of a NUTS2 region and the share of votes for Liberal democratic parties. The model also shows that there is a positive and incredibly significant relationship between the share of household in middle urbanized areas and the share of liberal democratic parties.
+
+The data seem to suggest that GDP per-capita negatively affects the share of votes for liberal-democratic parties. Puzzling indications come from the gender split in education, where the education of women and men negatively affects libdem parties, whereas the overall education seems to push the ALDE and Renew Europe-related political groups.
+
+This contradictory results need explanation that will come from the residuals chart below.
+
+```{r verbose = FALSE, message = FALSE, warning = FALSE, echo=FALSE}
+#Download of the data from the EURONED database (https://eu-ned.com/datasets/)
+#Download of Eurostat dataset on NUTS3 GDP  
+
+require(ggplot2)
+
+data.frame(residuals = gdp$residuals, fitted = gdp$fitted.values) %>% 
+  ggplot(aes(x = residuals,y = fitted)) + 
+  geom_point() + geom_smooth(method = 'lm') + papaja::theme_apa() + labs(title = 'Is the linear model the correct approach?', subtitle = 'Residuals vs. fitted', y = 'Fitted values')
+
+
+```
+
+The scatterplot above represents the fitted vs residual analysis of the OLS regression ran above. The problem is that, even if the line suggests that the model is sufficiently specified, a cluster of point between -.1 and 00 in the Fitted values and .15 and -.005 on the residuals suggest that there is a pattern thus questioning the assumption of linearity.
+
+The chart above, actually, suggests that there might be better tools than a linear model to explain the relationship between some socioeconomic variables and the share of vote for liberal democratic parties in the EU. If anything, though, the chart above demands a better explanation for the electoral results of ALDE-related parties.
+
+### nonparametric models
+
+Here, I will start the discussion of the model by taking a look at the charts provided by the *np* package. Here, I will not use ggplot2 [@ggplot2] because the regression object from *np* effectively hides the curves you will see in the chart.
+
+```{r fig.width=10, fig.height=10, message = FALSE, warning = FALSE, echo=FALSE, verbose = FALSE, include=FALSE}
+
+nonparam = npreg(share ~ gdp_pc + DEG1 + DEG2 + DEG3 + f_tertiary + m_tertiary + total_tertiary, data = data_19)
+
+
+data_1 = data.frame(prediction = fitted(nonparam), data_19)
+data_1 = data_1 %>% select(share, prediction, gdp_pc, DEG1, DEG2, DEG3, total_tertiary, nuts2016, year)
+data_1 = reshape2::melt(data_1, id.var = c('share', 'nuts2016', 'year', 'prediction'))
+```
+
+```{r fig.width=8, fig.height=8, message = FALSE, warning = FALSE, echo=FALSE, verbose = FALSE}
+plot(nonparam)
+```
+
+The regression suggests the non-linearity of the model as described above. In addition, it offers interesting insights on the relationships' functioning. Nonparametric models are statistical devices that allow to see how independent variables affect dependent variables. Here, we see that GDP per capita has a curious curved relationship where regions in the lower and upper quantiles are more interested in voting for liberal democratic parties.
+
+We also see that the urban-rural divide is more complex than anticipated. In this case, the share of votes grows with the share of households living in bigger urban areas whereas it declines in more urbanized NUTS2. The share of votes decline the more households live in second-level urban areas whereas the really interesting pattern is about education.
+
+The chart in the middle of the second row suggests that Liberal-democratic parties are stronger when, in NUTS2 regions, there is a group of highly-educated women which is not yet a majority. The nonparametric model also highlights that education among men is not significant or interesting. A further confirmation of this comes from the significance of the model:
+
+```{r include=FALSE}
+a = npsigtest(nonparam)
+```
+
+```{r verbose = FALSE, message = FALSE, warning = FALSE, echo=FALSE}
+sig_df = data.frame(variable = names(a$bws$icon), sd = a$bws$sdev,  acceptance = a$P, a$reject)
+kable_paper(kable(sig_df, 
+                 caption = "Signif. codes:  0 ‘***’ 0.001 ‘**’ 0.01 ‘*’ 0.05 ‘.’ 0.1 ‘ ’ 1", digits = 2, label = 'Significance for the nonparametric model'))
+
+
+```
+
+The table above offers some insights about the model. Again, GDP per capita is a big driver of the share of Liberal-democratic parties. The table also suggests that the share of votes is also guided by tertiary education and urbanization. The real troubling aspect deals with the standard deviation. In the GDP per capita it is around 12,000 euros, whereas the standard deviation for the degrees of udbanisation and education among women is around .20. Yet, the high level of significance and the patterns identified in the previous chart suggest that the model makes sense, at least under the theoretical point of view.
+
+In other words, it describe a vote which is aspirational. Urbanised but not metropolitan people might vote for the ideal of socially liberal yet pro-buisness party. In this sense, regions with a plurality of women with a tertiary degree could become the focal point of a campaign. The curious U-shaped curved in the first chart could be the indication that in deprived areas the optimistic and ambitious vibes of Libdem parties might be a seductive alternative to populist parties on both sides of the aisle.
+
+Although this theoretical frame might need some refinement, the next step is strictly methodological and it has the aim to visualize if the fitted values for the dependent variable match the actual values and, then, the task will be to measure the difference in terms of accuracy of the two models.
+
+```{r verbose = FALSE, message = FALSE, warning = FALSE, echo=FALSE}
+fitted_actual_nonparam = data.frame(fitted = fitted(nonparam), actual = data_19$share, 
+                                    regression = 'Nonparametric')
+
+pseudo_reg = lm(actual ~ fitted, data = fitted_actual_nonparam)
+fitted_actual_param = data.frame(fitted = gdp$fitted.values, actual = data_19$share, regression = 'Parametric')
+pseudo_reg_1 = lm(actual ~ fitted, data = fitted_actual_param)
+summary1 = summary(pseudo_reg)
+summary2 = summary(pseudo_reg_1)
+
+regressions = rbind(fitted_actual_nonparam, fitted_actual_param)
+ggplot(regressions, aes(x = fitted, y = actual, color = regression)) + geom_point() + geom_smooth(method = 'lm') + papaja::theme_apa() + 
+  facet_wrap(~regression) +
+  labs(title = 'Fitted vs. actual values', subtitle = 'Comparison between parametric and nonparametric models', x = 'Fitted values', y = 'Actual values') + theme(legend.position = "none")
+
+
+```
+
+The chart shows the accuracy of the fitted values on the actual values. The two facets already display the difference in terms of accuracy between the two models. The nonparametric model is more accurate in predicting the share of votes for Liberal-democratic parties. There is an influential case around .3 in the nonparametric model, but the overall accuracy is higher than the parametric model. In the right-hand side chart, the points hardly fit the line. This suggests that the parametric model is essentially flawed in predicting the share of vote for Libdem parties in Europe.
+
+The following table will offer better insights in how the two models compare in terms of accuracy.
+
+```{r verbose = FALSE, message = FALSE, warning = FALSE, echo=FALSE}
+p_value1 <- pf(summary1$fstatistic[1], summary1$fstatistic[2], summary1$fstatistic[3], lower.tail = FALSE)
+p_value2 <- pf(summary2$fstatistic[1], summary2$fstatistic[2], summary2$fstatistic[3], lower.tail = FALSE)
+
+comparison <- data.frame(
+  Statistic = c("Pseudo-R-squared", "Adj. Pseudo-R-squared", "Residual Std. Error", "F-statistic", "p-value"),
+  Nonparametric = c(summary1$r.squared, summary1$adj.r.squared, summary1$sigma, summary1$fstatistic[1], p_value1),
+  Parametric = c(summary2$r.squared, summary2$adj.r.squared, summary2$sigma, summary2$fstatistic[1], p_value2)
+)
+
+
+
+kable_paper(kable(comparison, caption = 'Comparison between parametric and nonparametric models', digits = 3, label = 'Comparison'))
+
+
+
+```
+
+The significance of the nonparametric model is confirmed by the comparison with its linear counterpart. The nonparametric model has a higher pseudo-R-squared and adjusted pseudo-R-squared, suggesting that it is a better model to explain the share of votes with the already-discussed variables. The residual standard error is also lower in the nonparametric model, suggesting that the nonparametric regression is more accurate in predicting the share of votes. The F-statistic is also higher in the nonparametric model, suggesting that the model is more significant. The p-value is very significant for both suggesting that the two models are related.
+
+The different accuracy in the models suggests that the the hypothesis of linearity has to be taken always with a grain of salt. The reality of radical center parties could be more complex than anticipated and the nonparametric model is a good way to understand the relationships between variables.
+
+### What if nonparametric regressions depend on the context?
+
+The present studies argued that the share of votes is not necessarily linearly related to the independent variables. The nonparametric model is a good way to understand the relationships between variables and to see how they affect the dependent variable. Other approaches, like using logarithms or exponential functions for nonlinear models still build on bold assumptions.
+
+Nonparametric models, on the other hand, help understand the relationships between variables without making assumptions about the functional form of the model, thus helping researchers understand voting patterns, and to develop strategies to mobilize voters in specific areas.
+
+Having only 15 countries out of 27 might have influenced the results. I decided to stick to this uneven sample to test the feasibility of an AI-powered research assistant. Future research should separately consider the missing countries, and validate the generalization that derives from the current non parametric model. For the moment, I will try to test the model splitting the dataset between the 15 countries. The hypothesis is that countries who belonged to the USSR or to the Warsaw Pact will have different patterns. Here are the results.
+
+```{r fig.width=10, fig.height=10, include=FALSE, verbose = FALSE, message = FALSE, warning = FALSE, echo=FALSE}
+
+
+data_soviet = subset(data_19, country_code %in% c("BG", "CZ","HU","LT"))
+data_non_soviet = subset(data_19, !(country_code %in% c("BG", "CZ","HU","LT")))
+
+soviet = npreg(share ~ gdp_pc + DEG1 + DEG2 + DEG3 + f_tertiary + m_tertiary + total_tertiary, data = data_soviet)
+
+non_soviet = npreg(share ~ gdp_pc + DEG1 + DEG2 + DEG3 + f_tertiary + m_tertiary + total_tertiary, data = data_non_soviet)
+
+np_non_soviet = npsigtest(non_soviet)
+np_soviet = npsigtest(soviet)
+
+
+
+```
+
+#### p-value Western Europe
+
+```{r verbose = FALSE, message = FALSE, warning = FALSE, echo=FALSE}
+sig_df_non_soviet = data.frame(variable = names(np_non_soviet$bws$icon), sd = np_non_soviet$bws$sdev,  acceptance = np_non_soviet$P, np_non_soviet$reject)
+
+sig_df_soviet = data.frame(variable = names(np_soviet$bws$icon), sd = np_non_soviet$bws$sdev,  acceptance = np_soviet$P, np_soviet$reject)
+
+
+
+
+
+kable_paper(kable(sig_df_non_soviet, 
+                  caption = "Signif. codes:  0 ‘***’ 0.001 ‘**’ 0.01 ‘*’ 0.05 ‘.’ 0.1 ‘ ’ 1", digits = 2, label = 'Significance for the nonparametric model in non-soviet countries'))
+
+
+
+
+
+```
+
+#### p-value: Communist-ruled countries
+
+```{r verbose = FALSE, message = FALSE, warning = FALSE, echo=FALSE}
+
+kable_paper(kable(sig_df_soviet,
+                  caption = "Signif. codes:  0 ‘***’ 0.001 ‘**’ 0.01 ‘*’ 0.05 ‘.’ 0.1 ‘ ’ 1", digits = 2, label = 'Significance for the nonparametric model'))
+
+```
+
+The nonparametric model from Western Europe largely confirms the findings of the general nonlinear model. The data from Central and Eastern countries do not. The only significant variable is the degree of tertiary education.
+
+```{r  fig.width=8, fig.height=8, verbose = FALSE, message = FALSE, warning = FALSE, echo=FALSE}
+
+plot(soviet)
+
+```
+
+The line of tertiary education is extremely noisy. Although it partially compounds the findings of the general model, this part of the research serves very well as a caveat. Western European countries amount to 134 vs 24 Ns in the Eastern European countries. The data is not enough to draw conclusions. The nonparametric model is a good way to understand the relationships between variables, but it is not a panacea. The model should be used with caution and with a large enough sample to draw conclusions.
+
+I did not visualize the curves because, at this point, I just want to measure how and if the two models present a convergence. In this case, I am satisfied with the negative answer coming from the data.
+
+### A final attempt with a linear model
+
+The main takeaways from this analysis is, so far, that linear models are not always the right choice. They are not for multiple reasons:
+
+-   The relationships between variables are not always linear
+-   Assumptions inform the linearity of the model
+-   Often, the relationships between variables is unknown and requires further exploration
+
+On the other hand, non parametric models can be computationally intensive leading to difficulties in handling bigger datasets. Yet, their informative nature, and the possibility of individuating thresholds that condition the relationships between variables, make them a valuable tool in the hands of researchers.
+
+Caution is needed. Communicating data using nonparametric analyses might be difficult because results might be counterintuitive. Yet, complex and dynamic representations are the superpower of nonparametric regressions. By highlighting under-reported trends, this kind of regression is very useful. Also, the fact that it is so case-specific could mean that it could be used in a comparative way in small-N studies.
+
+Although the use of data-driven models is generally discouraged [@gerring2017] [@gerring2012], nonparametric statistics could help developing low-budget data-driven studies.
+
+Readers might have noticed that this paper is not using multilevel regressions [@lme4]. The idea here is that I wanted to validate nonparametric regressions vs. linear models, hence a fancier linear regression was not the subject of this analysis. More importantly, multi-level regressions do not offer significance levels thus making the models difficult to compare via the KPI used so far, the p-value.
+
+Thirdly, it is my opinion that it is possible to gather evidence about the importance of specific countries by using dummy variables or, even, taking advantage of the *facor* data structure in R that, via the *lm* command can introduce categoric independent variables in the equation. I will highlight it in the next regression.
+
+```{r verbose = FALSE, message = FALSE, warning = FALSE, echo=FALSE}
+
+country_lm = lm(share ~ gdp_pc + DEG1 + DEG2 + DEG3 + f_tertiary + m_tertiary + total_tertiary + as.factor(country_code), data = data_19)
+country_summarty = summary(country_lm)
+tidy_model_1 <- broom::tidy(country_summarty)
+# Add significance stars manually
+tidy_model_1 <- tidy_model_1 %>%
+  mutate(signif = symnum(p.value, corr = FALSE, na = FALSE, 
+                         cutpoints = c(0, 0.001, 0.01, 0.05, 0.1, 1), 
+                         symbols = c("***", "**", "*", ".", " ")))
+
+# Extract and format the coefficients
+coefficients <- tidy_model_1 %>%
+  select(term, estimate, std.error, statistic, p.value, signif)
+
+# Print coefficients table
+kable(coefficients, caption = "Signif. codes:  0 ‘***’ 0.001 ‘**’ 0.01 ‘*’ 0.05 ‘.’ 0.1 ‘ ’ 1")
+
+# Extract R-squared and other statistics
+stats <- tibble(
+  Statistic = c("Multiple R-squared", "Adjusted R-squared", 
+                "F-statistic", "p-value"),
+  Value = c(country_summarty$r.squared, country_summarty$adj.r.squared, 
+            country_summarty$fstatistic[1], pf(country_summarty$fstatistic[1], 
+            country_summarty$fstatistic[2], country_summarty$fstatistic[3], lower.tail = FALSE))
+)
+
+# Print model statistics table
+kable(stats, caption = "Model Summary Statistics")
+
+```
+
+Table 7 shows how countries are important. The negative coefficients in Germany, Denmark and The Netherlands suggest that where social-democratic parties were strong, there was a tendency toward a reduced preference for liberal-democratic parties. Interestingly, countries like the Czech Republic and Bulgaria seem to appreciate a liberal and radical-centrist party.
+
+In general, also, we can spot support for radical centrist parties in the Francophone area of Europe, with Belgium, France, and Luxembourg all sporting positive coefficients with high levels of significance. This model is very good also in terms of R-square, explaining almost 80 per cent of the variance in the dependent variable.
+
+```{r verbose = FALSE, message = FALSE, warning = FALSE, echo=FALSE}
+ggplot(data_19, aes(y = as.factor(country_code), x = share)) + geom_boxplot() +labs(title = "Country-specific factors impact libdem parties", 
+                                                                                  subtitle = "One point means one NUTS2 region", 
+                                                                                  y = "country") +papaja::theme_apa()
+```
+
+Even without studying the residuals, the above chart confirms that country-specific issues might play an influence in the outcome of electoral results, but this is just a reflection of reality. In France, The Republic Onwards is the party of the President and in some former Communist countries, liberal democratic parties are easier to digest than socialist or Marxist parties.
+
+## Final remarks
+
+This study tried to leave no stones unturned. Under a methodological point of views, it highlighted the benefits and the drawbacks of non-linear regressions. On the other hand, it clearly displayed the limitations cross-sectional OLS approaches. I also offered ideas on how to use R and its data structure to investigate the impact of categorical variables on electoral results, yet, for numeric variables this study found convincing evidence that nonparametric regressions can help researcher and policymakers get a better sense of the world.
+
+This approach comes with its shortcomings, but it offers a better alternative to OLS bringing a dynamic picture to data which linear models do not. Although this research might need refinements, it shows that, in spite of time constraints, it can bring actionable intelligence, and help provide political organisation better tools to understand their voters.
+
+Combined with public opinion polls and their discrepancies from actual electoral results, this approach can yield unparalleled analyses and cumulative knowledge on elections.
+
+## References
